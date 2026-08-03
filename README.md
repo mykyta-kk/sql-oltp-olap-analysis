@@ -24,6 +24,7 @@ This project walks through a full analytics workflow on a real, undocumented e-c
 - Chose not to reverse-engineer the exact mechanism given low materiality, but excluded these amounts from financial metrics (AOV, revenue) to avoid understating them
 - Identified 5 internal/service accounts disguised as customers (100% of their "purchases" were internal transactions), excluded from customer analytics
 - Cash-on-delivery accounts for 44.63% of all orders - a signal of low trust in cashless payments in this market
+- Investigated an undocumented ` MV ` column suspected to be a distinct gross-value metric - confirmed it was a rounded, lower-precision duplicate of `price × qty`, and computed the value directly instead
 - [Full audit trail](docs/findings.md)
 
 ## Architecture
@@ -48,13 +49,15 @@ erDiagram
   }
   PRODUCTS {
     string sku PK
-    string category_name_1
+    string category_name
   }
   ORDERS {
     string increment_id PK
-    string customer_id FK
+    string customer_id FK "nullable"
     date order_date
     string payment_method
+    string status
+    float grand_total
   }
   ORDER_ITEMS {
     string item_id PK
@@ -63,8 +66,7 @@ erDiagram
     float price
     int qty_ordered
     float discount_amount
-    float grand_total
-    string status
+    float gross_value
   }
 ```
 

@@ -106,9 +106,47 @@
 **Conversion Rule:** Cast using `TO_DATE(created_at, 'MM/DD/YYYY')`.  
 
 ---
+ 
+## 9. Preflight Validation: Numeric Safety and Key Completeness
+*(SQL: `02_data_quality_checks.sql` → 2.9)*
+ 
+**Purpose:** Before writing `CREATE TABLE` statements, verified that a bulk `CAST` of the four financial fields (`price`, `qty_ordered`, `discount_amount`, `grand_total`) to `NUMERIC` would not fail partway through on malformed values.  
+**Result:** 0 rows fail a strict numeric-pattern check across all four fields.  
+**Additional check:** `qty_ordered` also matches an integer-only pattern with 0 exceptions.  
+**Conclusion:** All four fields can be safely cast - `qty_ordered` to `INTEGER`, the remaining three to `NUMERIC`.  
+**Note:** An initial completeness check on `Customer ID` (empty string only) also returned 0 - this specific result is revised below (Section 10), as it did not account for the `#N/A` pattern. The `increment_id` completeness check remains valid, as Section 10 confirms `#N/A` does not appear in that field.
+ 
+---
+ 
+## 10. Customer Identity Fields: Date Format and a Third Fake-NULL Pattern (`#N/A`)
+*(SQL: `02_data_quality_checks.sql` → 2.10)*
+ 
+**Finding:** `Customer Since` uses a distinct date format - `YYYY-MM` (e.g. `2016-8`), unlike `created_at`'s `MM/DD/YYYY`. It requires a separate parsing rule.  
+**Additional Finding:** 11 rows contain the literal text `#N/A` in `Customer Since`. Investigation showed all 11 of these rows **also** have `Customer ID = '#N/A'` - not a coincidence, but a third distinct fake-NULL pattern (an Excel-style artifact, unlike MySQL's `\N`).  
+**Materiality:** 11 / 584,524 = 0.0019% - well below threshold; the root cause (why these 11 specific transactions lack a resolved customer identity) was not investigated further.  
+**Scope check:** Confirmed `#N/A` does not appear in `increment_id`, `sku`, `category_name_1`, `payment_method`, or `status` - the pattern is confined to the customer identity fields.  
+**Revision:** This overturns the preliminary Section 9 conclusion - `orders.customer_id` **cannot** be treated as guaranteed non-empty. It must be a **nullable** foreign key.  
+**Rule:**
+- `orders.customer_id` → nullable FK
+- Apply a triple `NULLIF` when populating customer fields: `NULLIF(NULLIF(NULLIF("Customer ID", '\N'), ''), '#N/A')`
+- Cast `Customer Since` using a `YYYY-MM` pattern, not `MM/DD/YYYY`
+
+---
+ 
+## 11. `MV` Column: A Rounded Duplicate, Not an Independent Metric
+*(SQL: `02_data_quality_checks.sql` → 2.11)*
+ 
+**Initial Finding:** The `" MV "` column (note: literal leading/trailing spaces in the column name) could not be directly cast to `NUMERIC` - it uses a thousands-separator comma and padding spaces (e.g. `" 1,350 "`).  
+**Investigation:** After cleaning (`TRIM` + comma removal), one non-numeric pattern remained: the literal character `-`, found in 2,232 rows (0.38% of 584,524). Sample inspection showed these rows consistently have `price = 0` - `-` functions as a placeholder for zero in this column specifically (a fourth fake-value pattern, distinct from `''`, `\N`, and `#N/A`, and specific to this one column).  
+**Hypothesis Testing:** Initially compared cleaned `MV` against `price * qty_ordered` directly - 8,334 rows (1.43%) did not match. Closer inspection of the mismatches showed `price` consistently carries more decimal precision than `MV` (e.g. `price = 1349.1` vs `MV = 1,349`).  
+**Final Test:** Compared cleaned `MV` against `ROUND(price * qty_ordered)` - **0 mismatches** across the entire dataset.  
+**Conclusion:** `MV` is not an independent metric - it is a **rounded, integer-precision duplicate** of `price * qty_ordered`, and is strictly less precise than computing the value directly.  
+**Rule:** **Do not import `MV`.** Compute `order_items.gross_value = price * qty_ordered` directly from the already-validated `price`/`qty_ordered` fields. This also resolves the `-` placeholder automatically (rows with `price = 0` naturally yield `gross_value = 0`), without any special-case logic.
+ 
+---
 
 ## Summary Table of Rules for CREATE TABLE
-
+ 
 | Scope | Rule |
 | :--- | :--- |
 | Row filter | Apply universally: `WHERE item_id IS NOT NULL AND item_id != ''` |
@@ -119,12 +157,15 @@
 | Item revenue | In `order_items`: `price * qty_ordered - discount_amount` |
 | `category_name_1` | Apply `DISTINCT ON (sku)`, majority non-empty value |
 | `sku` in order_items | Apply `NULLIF(sku, '')` - 20 rows (0.003%) with empty SKUs become NULL, preventing a broken FK |
-| `customer_since` | No changes needed, zero conflicts found |
+| `customer_since` | No changes needed, zero conflicts found (one value per customer) |
+| `customer_id` / `customer_since` | Nullable FK; triple `NULLIF(..., '\N'), '', '#N/A')`; `Customer Since` uses `YYYY-MM` format |
+| Numeric fields | `price`, `discount_amount`, `grand_total` → `NUMERIC`; `qty_ordered` → `INTEGER` (validated safe to CAST, 0 malformed rows) |
+| `MV` / gross value | Do not import `MV` - compute `order_items.gross_value = price * qty_ordered` directly |
 | Service accounts | Exclude Customer IDs: 116, 11019, 30508, 35173, 44300 |
 | customercredit / productcredit | Keep client/order, exclude the amount from financial metrics |
 | Dates | Cast using: `TO_DATE(created_at, 'MM/DD/YYYY')` |
 | `Working Date` | Do not transfer to OLTP - 100% duplicate of `created_at` |
-
+ 
 ---
 
 ## Side Business Insight (For the Marketing Section)

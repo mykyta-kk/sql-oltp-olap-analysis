@@ -5,19 +5,28 @@
 
 -- NOTE: Since the data was imported into TEXT columns (see script 01), missing values 
 -- were loaded as empty strings ('') or literal '\N' (a common MySQL export artifact) 
--- instead of true SQL NULLs. To ensure accurate checks, the following logic is used:
+-- instead of true SQL NULLs. A third pattern, '#N/A' (an Excel-style artifact), was also
+-- found, but is narrowly confined to Customer ID / Customer Since (see 2.10) - unlike
+-- '' and '\N', which appear broadly across many columns.
+-- To ensure accurate checks, the following logic is used:
 -- 1. WHERE [column_name] IS NOT NULL AND [column_name] != ''
--- 2. NULLIF(NULLIF([column_name], '\N'), '')
+-- 2. NULLIF(NULLIF(NULLIF([column_name], '\N'), ''), '#N/A')
+--
+-- A fourth, distinct convention appears in the ' MV ' column: '-' is used as a
+-- placeholder for ZERO, not for NULL/missing. This is column-specific (see 2.11)
+-- and should not be confused with the fake-NULL patterns above.
 
 -- 2.1
 -- Verify the actual number of populated rows:
 
--- Approach 1: filter using WHERE clause.
+-- Approach 1: filter using WHERE clause:
+
 SELECT COUNT(*) AS total_rows, COUNT(pled.item_id) AS non_empty_rows 
 FROM staging.pakistan_largest_ecommerce_dataset pled
 WHERE pled.item_id IS NOT NULL AND pled.item_id != '';
 
--- Approach 2: optimized query (shows both total and valid row counts in a single pass).
+-- Approach 2: optimized query (shows both total and valid row counts in a single pass):
+
 SELECT 
     COUNT(*) AS total_rows, 
     COUNT(NULLIF(pled.item_id, '')) AS non_empty_rows 
@@ -341,3 +350,191 @@ LIMIT 5;
 -- Result: The query returns 0 rows. No month value in the dataset exceeds 12.
 -- Conclusion: The dates are consistently formatted in the US standard (MM/DD/YYYY).
 -- This ensures they can be safely parsed and cast to the DATE type in the next stage.
+
+-- 2.9 
+-- Check data type patterns and mandatory ID completeness
+
+-- Step A: Verify if all 4 financial fields match a numeric pattern:
+
+SELECT COUNT(*) AS bad_rows
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND (
+    pled.price !~ '^-?[0-9]+(\.[0-9]+)?$' OR
+    pled.qty_ordered !~ '^-?[0-9]+(\.[0-9]+)?$' OR
+    pled.discount_amount !~ '^-?[0-9]+(\.[0-9]+)?$' OR
+    pled.grand_total !~ '^-?[0-9]+(\.[0-9]+)?$'
+  );
+
+-- Result: 0. Safe to CAST all four fields to NUMERIC.
+
+-- Step B: Check if 'qty_ordered' is always a valid integer:
+
+SELECT COUNT(*) 
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND pled.qty_ordered !~ '^-?[0-9]+$';
+
+-- Result: 0. 'qty_ordered' can be safely cast to INTEGER.
+
+-- Step C: Check 'Customer ID' completeness (basic check, empty-string only):
+
+SELECT COUNT(*) 
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND (pled."Customer ID" IS NULL OR pled."Customer ID" = '');
+
+-- Result: 0. NOTE: this check does not catch the '#N/A' pattern - see 2.10, 
+-- which revises this to require a nullable customer_id FK.
+
+-- Step D: Check 'increment_id' completeness
+
+SELECT COUNT(*)
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND (pled.increment_id IS NULL OR pled.increment_id = '');
+
+-- Result: 0. Every item row belongs to a valid order.
+
+-- 2.10
+-- Check 'Customer Since' formats and identify '#N/A' artifacts
+
+-- Step A: Check 'Customer Since' date format:
+
+SELECT DISTINCT pled."Customer Since"
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+ORDER BY pled."Customer Since"
+LIMIT 20;
+
+-- Result: The format is YYYY-MM (differs from created_at's MM/DD/YYYY).
+
+-- Step B: Identify non-standard or invalid date values
+
+SELECT pled."Customer Since", COUNT(*)
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL 
+  AND pled.item_id != ''
+  AND pled."Customer Since" NOT LIKE '%-%'
+GROUP BY pled."Customer Since"
+ORDER BY pled."Customer Since";
+
+-- Result: '#N/A' - 11 rows.
+
+-- Step C: Check correlation with 'Customer ID'
+
+SELECT *
+FROM staging.pakistan_largest_ecommerce_dataset pled 
+WHERE pled."Customer Since" = '#N/A';
+
+-- Result: All 11 rows also have 'Customer ID' = '#N/A'. 
+-- This is an Excel-style NULL artifact (distinct from MySQL's '\N'), 
+-- likely representing guest checkouts or unresolved customer identities.
+-- Materiality: 11 / 584,524 = 0.0019% - well below the threshold, 
+-- so the root cause was not investigated further.
+
+-- Step D: Check if the '#N/A' artifact appears in other critical columns
+
+SELECT
+    COUNT(*) FILTER (WHERE pled.increment_id = '#N/A') AS increment_fake,
+    COUNT(*) FILTER (WHERE pled.sku = '#N/A') AS sku_fake,
+    COUNT(*) FILTER (WHERE pled.category_name_1 = '#N/A') AS category_fake,
+    COUNT(*) FILTER (WHERE pled.payment_method = '#N/A') AS payment_fake,
+    COUNT(*) FILTER (WHERE pled.status = '#N/A') AS status_fake
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != '';
+
+-- Result: 0 for all columns.
+-- Conclusion: The '#N/A' artifact is strictly isolated to the customer fields 
+-- ('Customer ID' and 'Customer Since'). The core order and product data is completely 
+-- clean from this specific Excel-style error.
+
+-- 2.11
+-- Validate ' MV ' as a standalone gross-value metric (item-level, pre-discount)
+
+-- Step A: Initial attempt to compare ' MV ' with calculated revenue:
+
+-- SELECT COUNT(*) AS mismatch_count
+-- FROM staging.pakistan_largest_ecommerce_dataset pled
+-- WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+--   AND CAST(pled." MV " AS NUMERIC) != (CAST(pled.price AS NUMERIC) * CAST(pled.qty_ordered AS NUMERIC));
+
+-- Result: ERROR - invalid input syntax for type numeric: " 1,350 "
+-- Conclusion: Direct casting fails because the ' MV ' column contains padding spaces 
+-- and thousands-separator commas. It requires TRIM() and comma removal (REPLACE) 
+-- before any mathematical operations can be performed.
+
+-- Step B: Check for any non-numeric patterns after cleaning:
+
+SELECT DISTINCT pled." MV "
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND TRIM(REPLACE(pled." MV ", ',', '')) !~ '^-?[0-9]+(\.[0-9]+)?$';
+
+-- Result: Only one non-numeric value found: '-'.
+
+-- Step C: Investigate the '-' pattern:
+
+SELECT pled.item_id, pled.price, pled.qty_ordered, pled.discount_amount, pled." MV ", pled.status, pled.sku 
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND TRIM(pled." MV ") = '-'
+LIMIT 12;
+
+-- Result: All sampled rows have price = 0. The '-' behaves as an Excel-style
+-- placeholder for zero in this column (a fourth fake-NULL pattern,
+-- distinct from '', '\N', and '#N/A').
+
+-- Step D: Materiality of the '-' pattern:
+
+SELECT COUNT(*)
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND TRIM(pled." MV ") = '-';
+
+-- Result: 2,232 rows (0.38% of 584,524). Below the materiality threshold -
+-- root cause not investigated further.
+
+-- Step E: Re-attempt the revenue comparison on cleaned data:
+
+SELECT COUNT(*)
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND TRIM(pled." MV ") != '-'
+  AND REPLACE(TRIM(pled." MV "), ',', '')::NUMERIC 
+      != CAST(pled.price AS NUMERIC) * CAST(pled.qty_ordered AS NUMERIC);
+
+-- Result: 8,334 rows differ (1.43%). 
+-- Conclusion: A direct comparison shows mismatches. Further inspection of 
+-- these specific rows is required to understand the root cause of the discrepancy.
+
+-- Step F: Inspect the mismatched rows to identify the pattern:
+
+SELECT pled." MV ", pled.price, pled.qty_ordered 
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND TRIM(pled." MV ") != '-'
+  AND REPLACE(TRIM(pled." MV "), ',', '')::NUMERIC 
+      != CAST(pled.price AS NUMERIC) * CAST(pled.qty_ordered AS NUMERIC)
+LIMIT 20;
+
+-- Result: Sample inspection shows 'price' consistently carries more decimal 
+-- precision than ' MV ' (e.g., price = 1349.1 vs MV = 1,349). 
+-- Hypothesis: ' MV ' is simply a rounded version of the calculated gross value.
+
+-- Step G: Test the rounding hypothesis:
+
+SELECT COUNT(*)
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND TRIM(pled." MV ") != '-'
+  AND REPLACE(TRIM(pled." MV "), ',', '')::NUMERIC 
+      != ROUND(CAST(pled.price AS NUMERIC) * CAST(pled.qty_ordered AS NUMERIC));
+
+-- Result: 0. 
+-- Conclusion: This confirms ' MV ' is a rounded (integer-precision) duplicate of 
+-- (price * qty_ordered), not an independent metric.
+-- FINAL RULE FOR ' MV ': Do NOT import the ' MV ' column into the OLTP schema. 
+-- Compute gross_value directly via (price * qty_ordered) - it is more precise 
+-- and naturally resolves the '-' placeholder issue (where price = 0) without 
+-- requiring special-case logic.

@@ -24,6 +24,7 @@
 - Вирішено не розкривати точний механізм через низьку матеріальність, але суми виключено з фінансових метрик (AOV, виручка), щоб їх не занижувати
 - Ідентифіковано 5 службових акаунтів під виглядом клієнтів (100% "покупок" - внутрішні транзакції), виключено з клієнтської аналітики
 - Оплата при отриманні (COD) - 44.63% усіх замовлень, сигнал низької довіри до безготівкових платежів на ринку
+- Досліджено недокументовану колонку ` MV `, яка спершу здавалась самостійною метрикою - підтверджено, що це округлена, менш точна копія `price × qty`, і замінено на прямий розрахунок
 - [Повний звіт з аудиту](docs/findings.md)
 
 ## Архітектура
@@ -47,13 +48,15 @@ erDiagram
   }
   PRODUCTS {
     string sku PK
-    string category_name_1
+    string category_name
   }
   ORDERS {
     string increment_id PK
-    string customer_id FK
+    string customer_id FK "nullable"
     date order_date
     string payment_method
+    string status
+    float grand_total
   }
   ORDER_ITEMS {
     string item_id PK
@@ -62,8 +65,7 @@ erDiagram
     float price
     int qty_ordered
     float discount_amount
-    float grand_total
-    string status
+    float gross_value
   }
 ```
 
