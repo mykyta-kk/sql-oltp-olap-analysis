@@ -396,6 +396,17 @@ WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
 
 -- Result: 0. Every item row belongs to a valid order.
 
+-- Step E: Check for negative values in 'qty_ordered' (e.g., returns or reversals):
+
+SELECT COUNT(*)
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND CAST(pled.qty_ordered AS INTEGER) < 0;
+
+-- Result: 0. 
+-- Conclusion: There are no negative quantities in the dataset, confirming 
+-- this column represents strictly positive order volumes.
+
 -- 2.10
 -- Check 'Customer Since' formats and identify '#N/A' artifacts
 
@@ -449,6 +460,18 @@ WHERE pled.item_id IS NOT NULL AND pled.item_id != '';
 -- ('Customer ID' and 'Customer Since'). The core order and product data is completely 
 -- clean from this specific Excel-style error.
 
+-- Step E: Validate the YYYY-MM format across the entire dataset:
+
+SELECT COUNT(*)
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND pled."Customer Since" != '#N/A'
+  AND pled."Customer Since" !~ '^[0-9]{4}-[0-9]{1,2}$';
+
+-- Result: 0. 
+-- Conclusion: Excluding the 11 '#N/A' artifacts, the YYYY-MM date format 
+-- is perfectly consistent across all records.
+
 -- 2.11
 -- Validate ' MV ' as a standalone gross-value metric (item-level, pre-discount)
 
@@ -484,6 +507,9 @@ LIMIT 12;
 -- Result: All sampled rows have price = 0. The '-' behaves as an Excel-style
 -- placeholder for zero in this column (a fourth fake-NULL pattern,
 -- distinct from '', '\N', and '#N/A').
+--
+-- Note: This sample also revealed test items (e.g., SKU 'test-product'). 
+-- See Section 2.12 for further investigation of these test records.
 
 -- Step D: Materiality of the '-' pattern:
 
@@ -538,3 +564,101 @@ WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
 -- Compute gross_value directly via (price * qty_ordered) - it is more precise 
 -- and naturally resolves the '-' placeholder issue (where price = 0) without 
 -- requiring special-case logic.
+
+-- 2.12
+-- Investigate '\N' artifacts and 'test' data contamination 
+
+-- Step A: Systematic scan for the '\N' pattern in remaining text columns:
+
+SELECT
+    COUNT(*) FILTER (WHERE pled.status = '\N') AS status_fake_null,
+    COUNT(*) FILTER (WHERE pled.payment_method = '\N') AS payment_fake_null,
+    COUNT(*) FILTER (WHERE pled.sku = '\N') AS sku_fake_null
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != '';
+
+-- Result: 'payment_method' and 'sku' return 0. 'status' returns 4 rows.
+-- Conclusion: The '\N' artifact is strictly isolated to 'category_name_1' (Section 2.4), 
+-- with only this minor 4-row leak into the 'status' column.
+
+-- Step B: Investigate the 4 rows where 'status' = '\N':
+
+SELECT *
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND pled.status = '\N';
+
+-- Result: All 4 rows share sku IN ('test-product-3', 'test-product') and
+-- 'Customer ID' = 1423.
+-- Conclusion: These SKUs match the incidental finding from Section 2.11. 
+-- This strongly suggests these records are artifacts from internal system testing, 
+-- requiring a broader and more detailed investigation.
+
+-- Step C: Broad scan for the 'test' substring in 'sku':
+
+SELECT pled.sku, COUNT(*) AS row_count
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND pled.sku ILIKE '%test%'
+GROUP BY pled.sku
+ORDER BY row_count DESC;
+
+-- Result: 28 distinct SKUs found. 
+-- Conclusion: Manual review identified 3 genuine products ('SKMT_Blood Test', 
+-- 'Aladdin_Test Star Cricket Ball - Red & White', 'sst_Vous Deteste-Regular fit-Medium'). 
+-- The remaining 25 are purely internal QA/test artifacts.
+
+-- Step D: Assess the materiality of confirmed test SKUs:
+
+SELECT COUNT(*)
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND pled.sku ILIKE '%test%'
+  AND pled.sku NOT IN (
+	'SKMT_Blood Test', 
+	'Aladdin_Test Star Cricket Ball - Red & White', 
+	'sst_Vous Deteste-Regular fit-Medium'
+	);
+
+-- Result: 1,777 rows (0.30% of 584,524 total rows).
+
+-- Step E: Establish baseline totals for orders and customers:
+
+SELECT 
+    COUNT(DISTINCT pled.increment_id) AS total_orders,
+    COUNT(DISTINCT pled."Customer ID") AS total_customers
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != '';
+
+-- Result: total_orders = 408,782, total_customers = 115,327.
+-- Conclusion: These baselines establish the total population size needed to 
+-- accurately calculate the materiality of test-contaminated entities below.
+
+-- Step F: Identify customers whose ENTIRE order history consists of test data:
+
+WITH customer_test_ratio AS (
+  SELECT pled."Customer ID",
+         COUNT(DISTINCT pled.increment_id) AS total_orders,
+         COUNT(DISTINCT pled.increment_id) FILTER (
+           WHERE pled.sku NOT ILIKE '%test%' 
+              OR pled.sku IN ('SKMT_Blood Test', 'Aladdin_Test Star Cricket Ball - Red & White', 'sst_Vous Deteste-Regular fit-Medium')
+         ) AS non_test_orders
+  FROM staging.pakistan_largest_ecommerce_dataset pled
+  WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  GROUP BY pled."Customer ID"
+)
+SELECT COUNT(*) AS fully_test_customers, SUM(total_orders) AS orders_affected
+FROM customer_test_ratio 
+WHERE non_test_orders = 0;
+
+-- Result: 68 customers and 201 orders are comprised entirely of test SKUs.
+-- Conclusion: Order materiality (201 / 408,782 ≈ 0.049%) and customer materiality
+-- (68 / 115,327 ≈ 0.059%) are both well below the threshold.
+-- The root cause is clearly internal QA testing, requiring no further investigation.
+--
+-- FINAL EXCLUSION RULES FOR ETL:
+-- 1. order_items: Exclude rows where 'sku' matches the confirmed test pattern.
+--    (Note: This automatically filters out the 4 status = '\N' rows found in Step B, 
+--    so no separate NULLIF rule is required for the 'status' column).
+-- 2. orders: Exclude any 'increment_id' left with zero items after applying Rule 1.
+-- 3. customers: Exclude the 68 'Customer ID's left with zero orders after applying Rule 2.

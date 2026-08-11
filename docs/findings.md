@@ -24,7 +24,7 @@
 **Finding:** The literal text string `\N` (two characters) appears in text columns (e.g., `category_name_1`, `sales_commission_code`) instead of a true `NULL`. Cause: This is a standard MySQL method of representing NULLs during CSV exports, which was not converted during the PostgreSQL import.  
 **Volume:** 7,850 rows containing `\N` in `category_name_1` (~1.3% of actual rows).  
 **Rule:** Apply `NULLIF(column, '\N')` to all text columns when building the final tables.  
-**Status:** This is a system-level import nuance, not an isolated issue - it is likely present in other text fields beyond those already identified.  
+**Status:** This is a system-level import nuance, not an isolated issue - it is likely present in other text fields beyond those already identified. *(Exhaustively re-checked in Section 12 - confirmed absent from `payment_method`/`sku`, with only an isolated 4-row leak into `status`.)*  
 
 ---
 
@@ -114,6 +114,7 @@
 **Result:** 0 rows fail a strict numeric-pattern check across all four fields.  
 **Additional check:** `qty_ordered` also matches an integer-only pattern with 0 exceptions.  
 **Conclusion:** All four fields can be safely cast - `qty_ordered` to `INTEGER`, the remaining three to `NUMERIC`.  
+**Additional check - negative values:** Confirmed `qty_ordered` contains zero negative values - returns/reversals are not represented as negative quantities in this dataset, so no special handling is required for `gross_value`/revenue calculations.  
 **Note:** An initial completeness check on `Customer ID` (empty string only) also returned 0 - this specific result is revised below (Section 10), as it did not account for the `#N/A` pattern. The `increment_id` completeness check remains valid, as Section 10 confirms `#N/A` does not appear in that field.
  
 ---
@@ -125,6 +126,7 @@
 **Additional Finding:** 11 rows contain the literal text `#N/A` in `Customer Since`. Investigation showed all 11 of these rows **also** have `Customer ID = '#N/A'` - not a coincidence, but a third distinct fake-NULL pattern (an Excel-style artifact, unlike MySQL's `\N`).  
 **Materiality:** 11 / 584,524 = 0.0019% - well below threshold; the root cause (why these 11 specific transactions lack a resolved customer identity) was not investigated further.  
 **Scope check:** Confirmed `#N/A` does not appear in `increment_id`, `sku`, `category_name_1`, `payment_method`, or `status` - the pattern is confined to the customer identity fields.  
+**Format Validation (exhaustive):** Excluding the 11 `#N/A` rows, confirmed the `YYYY-MM` pattern holds with zero exceptions across the entire table - not just the initial sample.  
 **Revision:** This overturns the preliminary Section 9 conclusion - `orders.customer_id` **cannot** be treated as guaranteed non-empty. It must be a **nullable** foreign key.  
 **Rule:**
 - `orders.customer_id` → nullable FK
@@ -145,6 +147,21 @@
  
 ---
 
+## 12. Test/QA Data Contamination in `sku`
+*(SQL: `02_data_quality_checks.sql` → 2.12)*
+ 
+**Context:** First noticed incidentally while sampling rows during the `MV` investigation (Section 11, Step C) - one sampled row had `sku = 'test-product'`. This prompted a systematic `\N` scope-check on `status`/`payment_method`/`sku` (closing the open question from Section 2) - `payment_method` and `sku` returned 0, but `status` returned 4 rows, all sharing the same `test-product`/`test-product-3` SKUs, confirming the pattern and triggering the full investigation below.  
+**Finding:** A broad scan (`sku ILIKE '%test%'`) returned 28 distinct SKU values. Manual review confirmed 3 are genuine products where "test" appears incidentally within a real name (`SKMT_Blood Test`, `Aladdin_Test Star Cricket Ball - Red & White`, `sst_Vous Deteste-Regular fit-Medium`). The remaining 25 values (e.g. `test-product`, `test-product-3`, `test_tcsconnect`, `test bundle product...`, `AhadTest...`) are internal QA/test artifacts.  
+**Materiality (item level):** 1,777 rows (0.30% of 584,524) match the confirmed test pattern.  
+**Deeper Finding:** For 68 distinct `Customer ID`s, **100%** of their order history (201 orders total) consists exclusively of these test SKUs - these are not real customers who happened to receive a test item, but accounts used entirely for internal testing.  
+**Materiality (order/customer level):** 201 / 408,782 orders ≈ 0.049%; 68 / 115,327 customers ≈ 0.059% - well below threshold; the internal process behind these test accounts was not investigated further.  
+**Rule (three-level cascade):**
+- `order_items` → exclude rows where `sku` matches the confirmed test pattern (25 values, excluding the 3 genuine products above)
+- `orders` → exclude any `increment_id` left with zero items after the rule above
+- `customers` → exclude the 68 `Customer ID`s left with zero orders after the rule above
+
+---
+
 ## Summary Table of Rules for CREATE TABLE
  
 | Scope | Rule |
@@ -159,8 +176,9 @@
 | `sku` in order_items | Apply `NULLIF(sku, '')` - 20 rows (0.003%) with empty SKUs become NULL, preventing a broken FK |
 | `customer_since` | No changes needed, zero conflicts found (one value per customer) |
 | `customer_id` / `customer_since` | Nullable FK; triple `NULLIF(..., '\N'), '', '#N/A')`; `Customer Since` uses `YYYY-MM` format |
-| Numeric fields | `price`, `discount_amount`, `grand_total` → `NUMERIC`; `qty_ordered` → `INTEGER` (validated safe to CAST, 0 malformed rows) |
+| Numeric fields | `price`, `discount_amount`, `grand_total` → `NUMERIC`; `qty_ordered` → `INTEGER` (validated safe to CAST, 0 malformed rows, 0 negative values) |
 | `MV` / gross value | Do not import `MV` - compute `order_items.gross_value = price * qty_ordered` directly |
+| Test/QA data | Exclude `sku` matching the confirmed test pattern; cascades to exclude 201 orders and 68 fully-test customers |
 | Service accounts | Exclude Customer IDs: 116, 11019, 30508, 35173, 44300 |
 | customercredit / productcredit | Keep client/order, exclude the amount from financial metrics |
 | Dates | Cast using: `TO_DATE(created_at, 'MM/DD/YYYY')` |

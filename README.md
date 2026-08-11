@@ -22,7 +22,7 @@ This project walks through a full analytics workflow on a real, undocumented e-c
 - Discovered `grand_total` is order-level, not item-level - required recalculating item revenue from `price × qty - discount`
 - Found `grand_total = 0` on `complete` orders tied to `customercredit`/`productcredit` payment methods (likely an internal loyalty/credit system), affecting 1.27% of orders
 - Chose not to reverse-engineer the exact mechanism given low materiality, but excluded these amounts from financial metrics (AOV, revenue) to avoid understating them
-- Identified 5 internal/service accounts disguised as customers (100% of their "purchases" were internal transactions), excluded from customer analytics
+- Identified two separate types of non-customer accounts requiring exclusion: 5 accounts using internal-only payment methods, and 68 accounts whose entire order history consisted of internal QA/test SKUs (`test-product`, etc.) - together confirming this dataset required active filtering of non-customer noise, not just cleanup of malformed values
 - Cash-on-delivery accounts for 44.63% of all orders - a signal of low trust in cashless payments in this market
 - Investigated an undocumented ` MV ` column suspected to be a distinct gross-value metric - confirmed it was a rounded, lower-precision duplicate of `price × qty`, and computed the value directly instead
 - [Full audit trail](docs/findings.md)
