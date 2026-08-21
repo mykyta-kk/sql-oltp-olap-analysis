@@ -43,7 +43,7 @@ erDiagram
   ORDERS ||--o{ ORDER_ITEMS : contains
   PRODUCTS ||--o{ ORDER_ITEMS : "appears in"
   CUSTOMERS {
-    string customer_id PK
+    bigint customer_id PK
     date customer_since
   }
   PRODUCTS {
@@ -52,14 +52,14 @@ erDiagram
   }
   ORDERS {
     string increment_id PK
-    string customer_id FK "nullable"
+    bigint customer_id FK "nullable"
     date order_date
     string payment_method
     string status
     float grand_total
   }
   ORDER_ITEMS {
-    string item_id PK
+    bigint item_id PK
     string increment_id FK
     string sku FK
     float price

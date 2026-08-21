@@ -104,6 +104,7 @@
 **Rule:** **Do not transfer** the `Working Date` column to the `oltp` schema during normalization - a single `order_date` (derived from `created_at`) is sufficient.  
 **Date Format Check:** Verified if the first number in `created_at` ever exceeds 12 (confirming it represents the month, not the day) - 0 rows violated this format.  
 **Conversion Rule:** Cast using `TO_DATE(created_at, 'MM/DD/YYYY')`.  
+**Additional Validation:** Confirmed `created_at` is consistent across all items within the same order (0 exceptions) - validating it can be safely promoted to a single `orders.order_date` value without any aggregation rule.  
 
 ---
  
@@ -115,7 +116,12 @@
 **Additional check:** `qty_ordered` also matches an integer-only pattern with 0 exceptions.  
 **Conclusion:** All four fields can be safely cast - `qty_ordered` to `INTEGER`, the remaining three to `NUMERIC`.  
 **Additional check - negative values:** Confirmed `qty_ordered` contains zero negative values - returns/reversals are not represented as negative quantities in this dataset, so no special handling is required for `gross_value`/revenue calculations.  
-**Note:** An initial completeness check on `Customer ID` (empty string only) also returned 0 - this specific result is revised below (Section 10), as it did not account for the `#N/A` pattern. The `increment_id` completeness check remains valid, as Section 10 confirms `#N/A` does not appear in that field.
+**Note:** An initial completeness check on `Customer ID` (empty string only) also returned 0 - this specific result is revised below (Section 10), as it did not account for the `#N/A` pattern. The `increment_id` completeness check remains valid, as Section 10 confirms `#N/A` does not appear in that field.  
+**ID Column Format Check:** Tested whether `item_id`, `increment_id`, and `Customer ID` are strictly numeric (a prerequisite for using `BIGINT` instead of `TEXT`). `item_id` and `Customer ID` (excluding known NULL artifacts) matched with zero exceptions. `increment_id` returned 9 non-numeric rows, all sharing a `-1` suffix (e.g. `100542843-1`) - materiality 9/408,782 ≈ 0.002%, not investigated further.  
+**Rule:**
+- `item_id` → `BIGINT`
+- `Customer ID` → `BIGINT` (after the triple `NULLIF` conversion described in Section 10)
+- `increment_id` → remains `TEXT`/`VARCHAR` to preserve the `-1` suffix variants
  
 ---
  
@@ -132,6 +138,8 @@
 - `orders.customer_id` → nullable FK
 - Apply a triple `NULLIF` when populating customer fields: `NULLIF(NULLIF(NULLIF("Customer ID", '\N'), ''), '#N/A')`
 - Cast `Customer Since` using a `YYYY-MM` pattern, not `MM/DD/YYYY`
+
+**Final Check:** Confirmed `\N` (the MySQL artifact from Section 2) does not appear in either `Customer ID` or `Customer Since` - `#N/A` is the sole missing-value placeholder in the customer identity domain.  
 
 ---
  
@@ -161,6 +169,27 @@
 - `customers` → exclude the 68 `Customer ID`s left with zero orders after the rule above
 
 ---
+ 
+## 13. `discount_amount`: Sign Convention and Order-vs-Item Level Ambiguity
+*(SQL: `02_data_quality_checks.sql` → 2.13)*
+ 
+**Finding - Inverted Sign Convention:** 3 rows have a negative `discount_amount`. Investigation showed `price + discount_amount = grand_total` for all 3 (e.g. `5995 + (-599.5) = 5395.5`) - not malformed data, but an inverted sign convention on a small subset. Rule: use `ABS(discount_amount)` in the revenue formula to neutralize both conventions.  
+**Finding - Discount Exceeds Gross Value:** 9,713 rows have `ABS(discount_amount)` exceeding `price * qty_ordered`, which would produce negative net revenue under the standard per-item formula.  
+**Investigation:** Tested two competing hypotheses against the 7,750 orders where `discount_amount` is identical across every item in a multi-item order (and non-zero):
+- **Hypothesis 1 (order-level, mirrors `grand_total`'s behavior in Section 5):** discount applied once per order → `SUM(price*qty) - discount = grand_total`. Matched **5,137** orders.
+- **Hypothesis 2 (genuinely per-item):** discount summed across items → `SUM(price*qty) - SUM(discount) = grand_total`. Matched **1,263** orders.
+- **Residual:** **1,350** orders match neither formula. Sample inspection showed no consistent pattern - some rows even have `grand_total` exceeding gross value, suggesting unmodeled charges (e.g. shipping) are mixed into the field.
+
+**Materiality (all relative to 408,782 total orders):**
+- Order-level duplication: 5,137 ≈ 1.26%
+- Standard per-item formula already correct: 1,263 ≈ 0.31%
+- Unexplained residual: 1,350 ≈ 0.33%
+
+All three groups are individually and collectively below the materiality threshold.
+ 
+**Decision:** Retain the standard per-item formula (`price * qty_ordered - ABS(discount_amount)`) as-is for `order_items` - do not special-case any of the three groups. Order-level aggregates (AOV, monthly revenue trends) are **unaffected**, since they are derived directly from `orders.grand_total`, not from summing `order_items`. Only category/SKU-level revenue breakdowns carry a small, bounded, and now-documented margin of error for this subset of orders.  
+ 
+---
 
 ## Summary Table of Rules for CREATE TABLE
  
@@ -177,7 +206,9 @@
 | `customer_since` | No changes needed, zero conflicts found (one value per customer) |
 | `customer_id` / `customer_since` | Nullable FK; triple `NULLIF(..., '\N'), '', '#N/A')`; `Customer Since` uses `YYYY-MM` format |
 | Numeric fields | `price`, `discount_amount`, `grand_total` → `NUMERIC`; `qty_ordered` → `INTEGER` (validated safe to CAST, 0 malformed rows, 0 negative values) |
+| ID column types | `item_id`, `Customer ID` → `BIGINT`; `increment_id` → `TEXT` (9 rows have a non-numeric `-1` suffix) |
 | `MV` / gross value | Do not import `MV` - compute `order_items.gross_value = price * qty_ordered` directly |
+| `discount_amount` | Use `ABS(discount_amount)` in the revenue formula; ~1.9% of multi-item orders (order-level duplication + unexplained residual) carry a small, documented item-level revenue discrepancy - order-level aggregates are unaffected |
 | Test/QA data | Exclude `sku` matching the confirmed test pattern; cascades to exclude 201 orders and 68 fully-test customers |
 | Service accounts | Exclude Customer IDs: 116, 11019, 30508, 35173, 44300 |
 | customercredit / productcredit | Keep client/order, exclude the amount from financial metrics |
