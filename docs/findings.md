@@ -118,6 +118,7 @@
 **Additional check - negative values:** Confirmed `qty_ordered` contains zero negative values - returns/reversals are not represented as negative quantities in this dataset, so no special handling is required for `gross_value`/revenue calculations.  
 **Note:** An initial completeness check on `Customer ID` (empty string only) also returned 0 - this specific result is revised below (Section 10), as it did not account for the `#N/A` pattern. The `increment_id` completeness check remains valid, as Section 10 confirms `#N/A` does not appear in that field.  
 **ID Column Format Check:** Tested whether `item_id`, `increment_id`, and `Customer ID` are strictly numeric (a prerequisite for using `BIGINT` instead of `TEXT`). `item_id` and `Customer ID` (excluding known NULL artifacts) matched with zero exceptions. `increment_id` returned 9 non-numeric rows, all sharing a `-1` suffix (e.g. `100542843-1`) - materiality 9/408,782 ≈ 0.002%, not investigated further.  
+**Order-Level Consistency Check:** Verified `Customer ID` is single-valued within each order (0 exceptions) - completing the family of order-level consistency checks (`status`, `payment_method`, `created_at`, and now `Customer ID`). All four fields are confirmed single-valued per `increment_id` with zero exceptions; the `orders.customer_id` foreign key is unambiguously defined for every order.  
 **Rule:**
 - `item_id` → `BIGINT`
 - `Customer ID` → `BIGINT` (after the triple `NULLIF` conversion described in Section 10)

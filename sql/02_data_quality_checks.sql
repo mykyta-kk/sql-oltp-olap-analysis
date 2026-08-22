@@ -444,7 +444,21 @@ WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
 -- Result: All 9 rows contain a '-1' suffix (e.g., '100542843-1').
 -- Conclusion: This minor artifact (likely a system bug or a split-order suffix) 
 -- affects a negligible number of rows and does not warrant deeper investigation.
---
+
+-- Step H: Verify 'Customer ID' is consistent within each order (i.e., the FK is well-defined):
+
+SELECT pled.increment_id, COUNT(DISTINCT pled."Customer ID") AS customer_variants
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+GROUP BY pled.increment_id
+HAVING COUNT(DISTINCT pled."Customer ID") > 1;
+
+-- Result: 0 rows. Every order maps to exactly one customer.
+-- Conclusion: Like 'status', 'payment_method', and 'created_at', the 'Customer ID' 
+-- is perfectly consistent within each order. This confirms it is strictly an order-level 
+-- attribute, ensuring the 'orders.customer_id' foreign key relationship is unambiguously 
+-- defined for normalization.
+-- 
 -- FINAL RULE FOR ID COLUMNS:
 -- 1. 'item_id' -> CAST to BIGINT.
 -- 2. 'Customer ID' -> CAST to BIGINT (after replacing '#N/A' with NULL).
