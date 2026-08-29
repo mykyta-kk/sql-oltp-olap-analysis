@@ -77,7 +77,7 @@ erDiagram
 ├── sql/
 │   ├── 01_setup_and_staging.sql
 │   ├── 02_data_quality_checks.sql
-│   ├── 03_normalization.sql
+│   ├── 03_normalization_oltp.sql
 │   ├── 04_indexes.sql
 │   ├── 05_analysis_business.sql
 │   ├── 06_analysis_financial.sql

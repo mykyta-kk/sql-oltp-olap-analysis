@@ -163,6 +163,18 @@ SELECT COUNT(*) FROM final_products;
 -- during the category mapping process. The 'final_products' CTE is validated 
 -- and ready to serve as the basis for CREATE TABLE oltp.products.
 
+-- Step I: Determine safe VARCHAR length bounds for sku and category_name_1:
+
+SELECT MAX(LENGTH(pled.sku)) AS max_sku_length, MAX(LENGTH(pled.category_name_1)) AS max_category_length
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+  AND pled.sku IS NOT NULL AND pled.sku != '';
+
+-- Result: max_sku_length = 69, max_category_length = 18.
+-- Conclusion: To provide a comfortable buffer above the observed maximums and 
+-- avoid any risk of silent truncation during future inserts, the data types for 
+-- the OLTP schema will be set to: sku -> VARCHAR(100), category_name -> VARCHAR(50).
+
 -- 2.5
 -- Check for status consistency per order (Verify one status per increment_id):
 

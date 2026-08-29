@@ -40,6 +40,7 @@
 **Issue:** If left unhandled, such rows will become "broken" references in the `order_items` table (a Foreign Key pointing nowhere, since there is no empty `sku` in the `products` table).  
 **Rule:** Use `NULLIF(sku, '')` when creating `order_items` - the empty string converts to a true SQL `NULL` (which is valid and handled correctly by the FK), preventing a broken reference.  
 **Materiality:** 0.003% - well below the threshold; additional investigation into the root cause was deemed unnecessary.  
+**Length Validation:** Confirmed maximum lengths (excluding test-data) - `sku`: 69 characters, `category_name`: 18. Rule: `sku` → `VARCHAR(100)`, `category_name` → `VARCHAR(50)` (buffer above observed max, avoiding silent truncation).   
 
 ---
 
@@ -202,7 +203,7 @@ All three groups are individually and collectively below the materiality thresho
 | `payment_method` | → Move to `orders` |
 | `grand_total` | → Move to `orders` |
 | Item revenue | In `order_items`: `price * qty_ordered - discount_amount` |
-| `category_name_1` | Apply `DISTINCT ON (sku)`, majority non-empty value |
+| `category_name_1` | Apply `DISTINCT ON (sku)`, majority non-empty value; `sku` → `VARCHAR(100)`, `category_name` → `VARCHAR(50)` |
 | `sku` in order_items | Apply `NULLIF(sku, '')` - 20 rows (0.003%) with empty SKUs become NULL, preventing a broken FK |
 | `customer_since` | No changes needed, zero conflicts found (one value per customer) |
 | `customer_id` / `customer_since` | Nullable FK; triple `NULLIF(..., '\N'), '', '#N/A')`; `Customer Since` uses `YYYY-MM` format |
