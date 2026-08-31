@@ -1,8 +1,8 @@
-# E-Commerce SQL Analytics Project (OLTP → OLAP Pipeline)
+# E-Commerce SQL Analytics & Data Modeling Project (OLTP → OLAP Pipeline)
 🇬🇧 [English](README.md) | 🇺🇦 [Українська](README.uk.md)
 
 ## Overview
-This project walks through a full analytics workflow on a real, undocumented e-commerce transactional dataset - starting from raw data validation (discovering encoding artifacts, order-vs-item level financial fields, and inconsistent categorization), through building a normalized OLTP schema in PostgreSQL, to SQL-based KPI/RFM/cohort analysis, an Excel reporting layer, and a final OLAP star-schema model designed for Power BI.
+This project walks through a full analytics workflow on a real, undocumented e-commerce transactional dataset - starting from raw data validation (discovering encoding artifacts, order-vs-item level financial fields, and inconsistent categorization), through applying relational database design principles (3NF normalization, PK/FK constraints, referential integrity) to build a normalized OLTP schema in PostgreSQL, to SQL-based KPI/RFM/cohort analysis, an Excel reporting layer, and a final OLAP star-schema model designed for Power BI.
 
 ## Tools & Stack
 - Docker (PostgreSQL 18, database containerization)
