@@ -94,6 +94,8 @@
 - Clients with 100% internal orders (the 5 IDs above) → **Exclude completely** from `customers`, RFM, and cohort analysis.
 - Clients with a mixed history (e.g., 36353) → Remain in the database; only specific rows with these internal payment methods are excluded from financial aggregations.
 
+**Post-Migration Note:** Building `oltp.order_items` (`03_normalization_oltp.sql`, 3.5, Step C) confirmed 43 genuine (non-test) item rows belonging to these 5 accounts' orders are correctly removed via the same cascade - completing the exclusion at the `order_items` level, not just `orders`/`customers`.   
+
 ---
 
 ## 8. Date Formatting and the Redundant `Working Date` Column
@@ -169,6 +171,10 @@
 - `order_items` → exclude rows where `sku` matches the confirmed test pattern (25 values, excluding the 3 genuine products above)
 - `orders` → exclude any `increment_id` left with zero items after the rule above
 - `customers` → exclude the 68 `Customer ID`s left with zero orders after the rule above
+
+**Post-Migration Validation:** Building `oltp.orders` (`03_normalization_oltp.sql`, 3.5) revealed the test-data cascade removes more orders than the 201 documented above - a broader order-level check confirmed **1,599 orders** are fully test-only. The additional 1,398 are isolated test-only orders placed by otherwise-normal customers, not captured by the customer-level view in this section. No rule change required - the existing cascade already correctly excludes these.
+
+*(Note: the 115,327 customer baseline above includes the literal `'#N/A'` text as a distinct value, uncleaned at that point in the investigation; the actual clean customer count, per Section 10's `NULLIF` rule, is 115,253.)*
 
 ---
  
