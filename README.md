@@ -13,8 +13,8 @@ This project walks through a full analytics workflow on a real, undocumented e-c
 
 ## Project Status
 - [x] Data quality audit (raw dataset validation, findings documented)
-- [ ] OLTP normalization (3NF schema, PK/FK, indexes) - *in progress*
-- [ ] SQL analytics layer (window functions, cohort retention, RFM)
+- [X] OLTP normalization (3NF schema, PK/FK, indexes)
+- [ ] SQL analytics layer (window functions, cohort retention, RFM) - *in progress*
 - [ ] Excel reporting layer
 - [ ] Power BI dashboard (OLAP star schema)
 
@@ -70,7 +70,12 @@ erDiagram
   }
 ```
 
-**Why 3NF first instead of a star schema right away:** A normalized model ensures data integrity during the SQL/Excel analysis phase; the dimensional layer is added later specifically to optimize DAX time intelligence in Power BI.
+**Why 3NF first instead of a star schema right away:** A normalized model ensures data integrity during the SQL/Excel analysis phase; the dimensional layer is added later specifically to optimize DAX time intelligence in Power BI.   
+**Indexing impact:** Adding four targeted indexes (FK columns + `order_date`) reduced 
+a representative customer-order lookup from 106.459 ms to 2.206 ms (~98% reduction, 
+~48x faster), with the query plan shifting from a parallel `Seq Scan` (135,701 rows 
+read and discarded) to an `Index Scan` + `Nested Loop` with zero wasted rows 
+(see `sql/04_indexes_oltp.sql`).
 
 ## Repository Structure
 ```
@@ -78,7 +83,7 @@ erDiagram
 │   ├── 01_setup_and_staging.sql
 │   ├── 02_data_quality_checks.sql
 │   ├── 03_normalization_oltp.sql
-│   ├── 04_indexes.sql
+│   ├── 04_indexes_oltp.sql
 │   ├── 05_analysis_business.sql
 │   ├── 06_analysis_financial.sql
 │   ├── 07_analysis_marketing.sql

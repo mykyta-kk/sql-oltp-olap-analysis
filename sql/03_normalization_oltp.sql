@@ -152,7 +152,7 @@ ALTER TABLE oltp.order_items ADD FOREIGN KEY (increment_id) REFERENCES oltp.orde
 ALTER TABLE oltp.order_items ADD FOREIGN KEY (sku) REFERENCES oltp.products(sku);
 
 -- 3.5 
--- Post-Migration Validation: Sanity-check row counts against Stage 1 findings
+-- Post-Migration Validation: Reconcile OLTP row counts against Stage 1 findings
 
 -- Step A: Validate row counts for all newly created OLTP tables:
 

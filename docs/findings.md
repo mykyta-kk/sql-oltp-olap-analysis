@@ -172,8 +172,7 @@
 - `orders` → exclude any `increment_id` left with zero items after the rule above
 - `customers` → exclude the 68 `Customer ID`s left with zero orders after the rule above
 
-**Post-Migration Validation:** Building `oltp.orders` (`03_normalization_oltp.sql`, 3.5) revealed the test-data cascade removes more orders than the 201 documented above - a broader order-level check confirmed **1,599 orders** are fully test-only. The additional 1,398 are isolated test-only orders placed by otherwise-normal customers, not captured by the customer-level view in this section. No rule change required - the existing cascade already correctly excludes these.
-
+**Post-Migration Validation:** Building `oltp.orders` (`03_normalization_oltp.sql`, 3.5) revealed the test-data cascade removes more orders than the 201 documented above - a broader order-level check confirmed **1,599 orders** are fully test-only. The additional 1,398 are isolated test-only orders placed by otherwise-normal customers, not captured by the customer-level view in this section. No rule change required - the existing cascade already correctly excludes these.  
 *(Note: the 115,327 customer baseline above includes the literal `'#N/A'` text as a distinct value, uncleaned at that point in the investigation; the actual clean customer count, per Section 10's `NULLIF` rule, is 115,253.)*
 
 ---
