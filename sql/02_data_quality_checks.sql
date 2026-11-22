@@ -176,7 +176,9 @@ WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
 -- the OLTP schema will be set to: sku -> VARCHAR(100), category_name -> VARCHAR(50).
 
 -- 2.5
--- Check for status consistency per order (Verify one status per increment_id):
+-- Evaluate 'status' attribute consistency and value distribution
+
+-- Step A: Check for status consistency per order (Verify one status per increment_id):
 
 SELECT pled.increment_id, COUNT(DISTINCT pled.status) AS status_variants
 FROM staging.pakistan_largest_ecommerce_dataset pled 
@@ -186,6 +188,32 @@ HAVING COUNT(DISTINCT pled.status) > 1;
 
 -- Result: The query returns 0 rows, meaning no order has conflicting statuses.
 -- Conclusion: Each order ('increment_id') is consistently mapped to a single 'status'.
+
+-- Step B: Distribution of 'status' values in the raw data:
+
+SELECT 	pled.status,
+		COUNT(*) AS item_count,
+		COUNT(DISTINCT pled.increment_id) AS order_count
+FROM staging.pakistan_largest_ecommerce_dataset pled 
+WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
+GROUP BY pled.status 
+ORDER BY order_count DESC, pled.status ASC;
+
+-- Result: 17 distinct values. Order counts sum to 408,782 (items: 584,524),
+-- consistent with Step A (status is single-valued per order).
+-- Five values (complete, canceled, order_refunded, received, refund) cover 99.59% of
+-- orders, and the other 12 values together account for 1,660 orders (0.41%).
+-- Two of these 12 are import artifacts: an empty string '' (11 orders / 15 items) and the
+-- literal '\N' (2 orders / 4 items, both orders are test-only and excluded from oltp, see 2.12).
+-- Conclusion: The empty-string status was not caught by the earlier checks. Rule: apply
+-- NULLIF(status, '') when building oltp.orders (Section 3.3, 03_normalization_oltp.sql).
+-- The business meaning of the remaining status values is not established here and is
+-- analyzed separately in 05_analysis_business.sql.
+--
+-- Note: This step was added after the original audit was committed, when the first
+-- status distribution query on oltp.orders showed 11 orders with an empty status.
+-- Step A only tested that status is single-valued per order, and the '\N' scan in 2.12
+-- did not cover empty strings.
 
 -- 2.6
 -- Check for payment method consistency per order (Verify one payment method per increment_id)
@@ -740,8 +768,9 @@ WHERE non_test_orders = 0;
 --
 -- FINAL EXCLUSION RULES FOR ETL:
 -- 1. order_items: Exclude rows where 'sku' matches the confirmed test pattern.
---    (Note: This automatically filters out the 4 status = '\N' rows found in Step B, 
---    so no separate NULLIF rule is required for the 'status' column).
+--    (Note: This automatically filters out the 4 status = '\N' rows found in Step B,
+--    so no '\N' handling is required for the 'status' column. The empty-string case
+--    is a separate rule, see 2.5 Step B.)
 -- 2. orders: Exclude any 'increment_id' left with zero items after applying Rule 1.
 -- 3. customers: Exclude the 68 'Customer ID's left with zero orders after applying Rule 2.
 
@@ -865,3 +894,23 @@ LIMIT 20;
 -- as-is for the 'order_items' table. Order-level aggregates (AOV, revenue trends) 
 -- remain unaffected because they will use 'orders.grand_total' directly. 
 -- Category/SKU-level metrics will carry a minor, acceptable margin of error.
+
+-- 2.14
+-- Determine safe VARCHAR length bounds for the order-level text columns
+
+SELECT MAX(LENGTH(pled.increment_id)) AS max_increment_id_length,
+       MAX(LENGTH(pled.payment_method)) AS max_payment_method_length,
+       MAX(LENGTH(pled.status)) AS max_status_length
+FROM staging.pakistan_largest_ecommerce_dataset pled
+WHERE pled.item_id IS NOT NULL AND pled.item_id != '';
+
+-- Result: max_increment_id_length = 11, max_payment_method_length = 17, max_status_length = 14.
+-- Conclusion: Same approach as in 2.4 Step I: a buffer above the observed maximums to avoid
+-- silent truncation by CAST(... AS VARCHAR(n)). The limits are rounded-up conventional values,
+-- not derived by a formula (a larger VARCHAR(n) has no storage or performance cost in PostgreSQL);
+-- 'status' is kept tighter because it is a closed vocabulary (17 distinct values). The data types
+-- for the OLTP schema are set to: increment_id -> VARCHAR(50), payment_method -> VARCHAR(50),
+-- status -> VARCHAR(20).
+--
+-- Note: This section was added after 03_normalization_oltp.sql was built, to document the
+-- evidence for the limits already used in 3.3. The observed maximums confirm them.

@@ -92,7 +92,7 @@ SELECT DISTINCT
     CAST(NULLIF(NULLIF(NULLIF(pled."Customer ID", '\N'), ''), '#N/A') AS BIGINT) AS customer_id,
     TO_DATE(pled.created_at, 'MM/DD/YYYY') AS order_date,
     CAST(pled.payment_method AS VARCHAR(50)) AS payment_method,
-    CAST(NULLIF(pled.status, '\N') AS VARCHAR(20)) AS status,
+    CAST(NULLIF(pled.status, '') AS VARCHAR(20)) AS status,
     CAST(pled.grand_total AS NUMERIC) AS grand_total
 FROM staging.pakistan_largest_ecommerce_dataset pled
 WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
@@ -165,10 +165,13 @@ UNION ALL
 SELECT 'order_items', COUNT(*) AS row_count FROM oltp.order_items;
 
 -- Result: customers = 115,253; products = 84,864; orders = 407,141; order_items = 582,704.
--- Conclusion: The 'customers' and 'products' row counts match the expected totals exactly. 
+-- Conclusion: 'customers' and 'products' match expected totals:
+--   customers: 115,327 total - 1 (#N/A) - 5 service - 68 test = 115,253 (exact match)
+--   products:  84,889 total - 25 test SKU = 84,864 (exact match)
 -- However, there is a discrepancy in the 'orders' count. The baseline projection was 
 -- 408,539 (calculated as: 408,782 total - 42 service account orders - 201 orders from 
 -- fully-test customers), but the actual inserted count is 407,141.
+-- The 'order_items' gap is resolved in Step C.
 
 -- Step B: Investigate the 'orders' discrepancy (verify isolated test-only orders):
 
@@ -203,6 +206,45 @@ WHERE pled.item_id IS NOT NULL AND pled.item_id != ''
 -- (584,524 total staging rows - 1,777 test SKUs), while the actual inserted 
 -- count is 582,704 - a gap of exactly 43 rows, fully resolved by this query.
 -- Conclusion: These are genuine (non-test) item rows correctly dropped because 
--- their parent service-account orders (Section 7) are excluded from oltp.orders, 
+-- their parent service-account orders (Section 2.7c) are excluded from oltp.orders, 
 -- removed via the EXISTS cascade rather than the SKU filter. This confirms full 
 -- row-count reconciliation across all four OLTP tables.
+
+-- Step D: Validate the empty-string status rule (see Section 2.5 Step B):
+
+SELECT COUNT(*) FILTER (WHERE o.status = '') AS empty_status,
+       COUNT(*) FILTER (WHERE o.status IS NULL) AS null_status
+FROM oltp.orders o;
+
+-- Result: empty_status = 0, null_status = 11.
+-- Conclusion: The 11 orders with an empty status in the raw data are stored as true NULLs, 
+-- and the row counts from Step A remain unchanged.
+
+-- Step E: Verify that products without a category are stored as true NULLs:
+
+SELECT COUNT(*) FILTER (WHERE p.category_name IS NULL) AS null_cat,
+       COUNT(*) FILTER (WHERE TRIM(p.category_name) = '') AS empty_cat
+FROM oltp.products p;
+
+-- Result: null_cat = 271, empty_cat = 0.
+-- Conclusion: 271 of 84,864 products (0.32%) have no valid category in any source row, 
+-- so the majority rule cannot assign one. They are stored as true NULLs, and no empty 
+-- strings or whitespace leaked through NULLIF.
+
+-- Step F: Measure the impact of uncategorized products on order_items:
+
+SELECT COUNT(*) AS items_total,
+       COUNT(*) FILTER (WHERE p.category_name IS NULL) AS items_uncategorized,
+       COUNT(*) FILTER (WHERE oi.sku IS NULL) AS items_null_sku,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE p.category_name IS NULL)
+             / COUNT(*), 2) AS pct_items,
+       ROUND(100.0 * SUM(oi.gross_value) FILTER (WHERE p.category_name IS NULL)
+             / SUM(oi.gross_value), 2) AS pct_gross_value
+FROM oltp.order_items oi
+LEFT JOIN oltp.products p ON p.sku = oi.sku;
+
+-- Result: 4,129 of 582,704 items (0.71%) and 0.67% of gross value have no category.
+-- Conclusion: 4,109 of these items belong to the 271 products above, while the other 20 
+-- are items with an empty SKU (Section 2.4 Step F). This is well below the 5% materiality 
+-- threshold, so no ETL change is needed: the NULL category is kept and labelled 
+-- 'Uncategorized' in the analysis layer.
