@@ -13,7 +13,7 @@
 
 ## Статус проєкту
 - [x] Аудит якості даних (валідація сирого датасету, висновки задокументовано)
-- [X] Нормалізація OLTP (схема 3NF, PK/FK, індекси)
+- [x] Нормалізація OLTP (схема 3NF, PK/FK, індекси)
 - [ ] Шар SQL-аналітики (віконні функції, утримання когорт, RFM) - *в процесі*
 - [ ] Шар звітності в Excel
 - [ ] Дашборд Power BI (схема "зірка" OLAP)
@@ -56,16 +56,16 @@ erDiagram
     date order_date
     string payment_method
     string status
-    float grand_total
+    decimal grand_total
   }
   ORDER_ITEMS {
     bigint item_id PK
     string increment_id FK
-    string sku FK
-    float price
+    string sku FK "nullable"
+    decimal price
     int qty_ordered
-    float discount_amount
-    float gross_value
+    decimal discount_amount
+    decimal gross_value
   }
 ```
 

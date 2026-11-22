@@ -13,7 +13,7 @@ This project walks through a full analytics workflow on a real, undocumented e-c
 
 ## Project Status
 - [x] Data quality audit (raw dataset validation, findings documented)
-- [X] OLTP normalization (3NF schema, PK/FK, indexes)
+- [x] OLTP normalization (3NF schema, PK/FK, indexes)
 - [ ] SQL analytics layer (window functions, cohort retention, RFM) - *in progress*
 - [ ] Excel reporting layer
 - [ ] Power BI dashboard (OLAP star schema)
@@ -57,16 +57,16 @@ erDiagram
     date order_date
     string payment_method
     string status
-    float grand_total
+    decimal grand_total
   }
   ORDER_ITEMS {
     bigint item_id PK
     string increment_id FK
-    string sku FK
-    float price
+    string sku FK "nullable"
+    decimal price
     int qty_ordered
-    float discount_amount
-    float gross_value
+    decimal discount_amount
+    decimal gross_value
   }
 ```
 
@@ -94,7 +94,7 @@ read and discarded) to an `Index Scan` + `Nested Loop` with zero wasted rows
 ├── excel/
 │   └── dashboard.xlsx
 ├── screenshots/
-│   └── excel/
+│   ├── excel/
 │   └── power-bi/
 ├── .gitignore
 ├── README.md
