@@ -23,7 +23,7 @@
 
 **Finding:** The literal text string `\N` (two characters) appears in text columns (e.g., `category_name_1`, `sales_commission_code`) instead of a true `NULL`. Cause: This is a standard MySQL method of representing NULLs during CSV exports, which was not converted during the PostgreSQL import.  
 **Volume:** 7,850 rows containing `\N` in `category_name_1` (~1.3% of actual rows).  
-**Rule:** Apply `NULLIF(column, '\N')` to all text columns when building the final tables.  
+**Rule:** Apply `NULLIF(column, '\N')` to every text column where `\N` was actually found - in practice only `category_name_1` (the 4 `status` rows are test-only and excluded by the cascade, see Section 12).  
 **Status:** This is a system-level import nuance, not an isolated issue - it is likely present in other text fields beyond those already identified. *(Exhaustively re-checked in Section 12 - confirmed absent from `payment_method`/`sku`, with only an isolated 4-row leak into `status`.)*  
 
 ---
@@ -33,14 +33,20 @@
 
 **Initial Finding:** Dozens of SKUs were mapped to 2 "different" categories.  
 **After fixing the `\N` artifact:** Only **2 SKUs** with genuine conflicts remained (`AJ-ajrak_AJA-005-Large`, `AJ-ajrak_AJA-005-Medium`) - likely unisex clothing appearing in both Men's and Women's Fashion.  
-**Additionally:** A significant portion of SKUs has no category at all (only `\N` or empty). Probable explanation: the category was assigned once when the product was initially added to the catalog, rather than being recorded during every transaction export (a source system limitation, unconfirmed).  
-**Rule:** Apply a majority rule (the most frequent non-empty category value per SKU) - using `DISTINCT ON (sku) ... ORDER BY sku, COUNT(*) DESC` *(see 2.4 Step E)*.  
+**Additionally:** 271 of 84,864 SKUs (0.32%) have only `\N` or empty values in every row, so no category can be assigned to them and `products.category_name` stays `NULL` *(see 3.5 Steps E and F in `03_normalization_oltp.sql`)*. This was measured after the migration; the cause was not investigated further.  
+**Materiality (item level):** 4,129 of 582,704 `order_items` (0.71%) and 0.67% of gross value have no category - 4,109 items from these 271 SKUs plus the 20 items with an empty `sku` (below) - well below the threshold.  
 
 **Additional Finding - Empty `sku` with a populated `item_id`:** 20 rows (0.003% of 584,524) have `sku = ''`, even though the transaction row (`item_id`) is valid *(see 2.4 Step F)*.  
 **Issue:** If left unhandled, such rows will become "broken" references in the `order_items` table (a Foreign Key pointing nowhere, since there is no empty `sku` in the `products` table).  
-**Rule:** Use `NULLIF(sku, '')` when creating `order_items` - the empty string converts to a true SQL `NULL` (which is valid and handled correctly by the FK), preventing a broken reference.  
 **Materiality:** 0.003% - well below the threshold; additional investigation into the root cause was deemed unnecessary.  
-**Length Validation:** Confirmed maximum lengths (excluding test-data) - `sku`: 69 characters, `category_name`: 18. Rule: `sku` → `VARCHAR(100)`, `category_name` → `VARCHAR(50)` (buffer above observed max, avoiding silent truncation).   
+
+**Length Validation:** Maximum lengths across all valid item rows with a non-empty `sku` (test SKUs included, so these are upper bounds) - `sku`: 69 characters, `category_name`: 18 *(see 2.4 Step I)*.  
+
+**Rule:**
+- Apply a majority rule (the most frequent non-empty category value per SKU) - using `DISTINCT ON (sku) ... ORDER BY sku, COUNT(*) DESC` *(see 2.4 Step E)*.
+- SKUs with no valid category in any row keep `NULL` in `oltp.products` rather than an invented value; in the analysis layer, label them with `COALESCE(category_name, 'Uncategorized')`.
+- Use `NULLIF(sku, '')` when creating `order_items` - the empty string converts to a true SQL `NULL` (which is valid and handled correctly by the FK), preventing a broken reference.
+- `sku` → `VARCHAR(100)`, `category_name` → `VARCHAR(50)` (buffer above observed max, avoiding silent truncation); the order-level text columns are covered in 2.14 and in the Summary Table. 
 
 ---
 
@@ -50,6 +56,10 @@
 **Checked:** Whether `status` and `payment_method` are always unique within a single order (`increment_id`).  
 **Result:** Yes, in both cases, with zero exceptions.  
 **Conclusion:** Both fields belong to the `orders` table level, not `order_items`.  
+
+**Additional Finding - Empty-string `status`:** 11 orders have `status = ''` *(see 2.5 Step B)*. The original check above only verified that status is single-valued per order, and the `\N` scan in 2.12 did not cover empty strings, so this surfaced only when the status distribution was first queried on `oltp.orders`, after the audit was committed. All 11 orders are dated between 2018-03-15 and 2018-07-18; the cause was not investigated further.  
+**Materiality:** 11 / 408,782 ≈ 0.0027% - well below the threshold.  
+**Rule:** Use `NULLIF(status, '')` when building `oltp.orders` (see 3.3 in `03_normalization_oltp.sql`) - the empty string becomes a true `NULL`; analysis treats `NULL` as 'unknown'.  
 
 ---
 
@@ -172,8 +182,8 @@
 - `orders` → exclude any `increment_id` left with zero items after the rule above
 - `customers` → exclude the 68 `Customer ID`s left with zero orders after the rule above
 
-**Post-Migration Validation:** Building `oltp.orders` (`03_normalization_oltp.sql`, 3.5) revealed the test-data cascade removes more orders than the 201 documented above - a broader order-level check confirmed **1,599 orders** are fully test-only. The additional 1,398 are isolated test-only orders placed by otherwise-normal customers, not captured by the customer-level view in this section. No rule change required - the existing cascade already correctly excludes these.  
-*(Note: the 115,327 customer baseline above includes the literal `'#N/A'` text as a distinct value, uncleaned at that point in the investigation; the actual clean customer count, per Section 10's `NULLIF` rule, is 115,253.)*
+**Post-Migration Validation:** Building `oltp.orders` (`03_normalization_oltp.sql`, 3.5, Step B) revealed the test-data cascade removes more orders than the 201 documented above - a broader order-level check confirmed **1,599 orders** are fully test-only. The additional 1,398 are isolated test-only orders placed by otherwise-normal customers, not captured by the customer-level view in this section. No rule change required - the existing cascade already correctly excludes these.  
+*(Note: the 115,327 customer baseline above includes the literal `'#N/A'` text as a distinct value, uncleaned at that point in the investigation. After the `NULLIF` rule from Section 10 the clean count is 115,326; `oltp.customers` holds 115,253 after also excluding the 5 service accounts and the 68 fully-test customers, see `03_normalization_oltp.sql`, 3.5, Step A.)*
 
 ---
  
@@ -203,20 +213,21 @@ All three groups are individually and collectively below the materiality thresho
 | Scope | Rule |
 | :--- | :--- |
 | Row filter | Apply universally: `WHERE item_id IS NOT NULL AND item_id != ''` |
-| Text NULLs | Apply to all text columns: `NULLIF(column, '\N')` |
-| `status` | → Move to `orders` |
+| Text NULLs | `NULLIF(column, '\N')` only where `\N` was found: `category_name_1` (7,850 rows). Not needed for `status` (4 test-only rows, excluded), `payment_method`, `sku` |
+| `status` | → Move to `orders`; apply `NULLIF(status, '')` (11 orders with an empty status become NULL) |
 | `payment_method` | → Move to `orders` |
 | `grand_total` | → Move to `orders` |
 | Item revenue | In `order_items`: `price * qty_ordered - discount_amount` |
-| `category_name_1` | Apply `DISTINCT ON (sku)`, majority non-empty value; `sku` → `VARCHAR(100)`, `category_name` → `VARCHAR(50)` |
+| `category_name_1` | Apply `DISTINCT ON (sku)`, majority non-empty value; 271 SKUs with no valid category in any row stay `NULL` (0.71% of items; labelled 'Uncategorized' in analysis) |
 | `sku` in order_items | Apply `NULLIF(sku, '')` - 20 rows (0.003%) with empty SKUs become NULL, preventing a broken FK |
 | `customer_since` | No changes needed, zero conflicts found (one value per customer) |
 | `customer_id` / `customer_since` | Nullable FK; triple `NULLIF(..., '\N'), '', '#N/A')`; `Customer Since` uses `YYYY-MM` format |
 | Numeric fields | `price`, `discount_amount`, `grand_total` → `NUMERIC`; `qty_ordered` → `INTEGER` (validated safe to CAST, 0 malformed rows, 0 negative values) |
-| ID column types | `item_id`, `Customer ID` → `BIGINT`; `increment_id` → `TEXT` (9 rows have a non-numeric `-1` suffix) |
+| ID column types | `item_id`, `Customer ID` → `BIGINT`; `increment_id` → `VARCHAR(50)` (9 rows have a non-numeric `-1` suffix, so it stays text) |
+| Text column lengths | `sku` → `VARCHAR(100)`, `category_name` → `VARCHAR(50)`, `increment_id` → `VARCHAR(50)`, `payment_method` → `VARCHAR(50)`, `status` → `VARCHAR(20)` (observed maximums: 69 / 18 / 11 / 17 / 14; see 2.4 Step I and 2.14) |
 | `MV` / gross value | Do not import `MV` - compute `order_items.gross_value = price * qty_ordered` directly |
-| `discount_amount` | Use `ABS(discount_amount)` in the revenue formula; ~1.9% of multi-item orders (order-level duplication + unexplained residual) carry a small, documented item-level revenue discrepancy - order-level aggregates are unaffected |
-| Test/QA data | Exclude `sku` matching the confirmed test pattern; cascades to exclude 201 orders and 68 fully-test customers |
+| `discount_amount` | Use `ABS(discount_amount)` in the revenue formula; ~1.6% of orders (order-level duplication 1.26% + unexplained residual 0.33%) carry a small, documented item-level revenue discrepancy - order-level aggregates are unaffected |
+| Test/QA data | Exclude `sku` matching the confirmed test pattern; cascades to exclude 1,599 test-only orders (201 from the 68 fully-test customers + 1,398 isolated) and the 68 fully-test customers |
 | Service accounts | Exclude Customer IDs: 116, 11019, 30508, 35173, 44300 |
 | customercredit / productcredit | Keep client/order, exclude the amount from financial metrics |
 | Dates | Cast using: `TO_DATE(created_at, 'MM/DD/YYYY')` |
